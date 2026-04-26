@@ -22,7 +22,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { getSession } from '../../db/sessions.js';
+import { findMostRecentUserFacingSession, getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
 import { resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
@@ -136,7 +136,13 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
   if (!getAgentGroup(targetAgentGroupId)) {
     throw new Error(`target agent group ${targetAgentGroupId} not found for message ${msg.id}`);
   }
-  const { session: targetSession } = resolveSession(targetAgentGroupId, null, null, 'agent-shared');
+  // Prefer the most recently active user-facing session so the target agent's
+  // session_routing carries the real channel/thread context (e.g. the Discord
+  // thread the user is waiting in). Without this, a2a replies land in an
+  // agent-shared session whose session_routing is null, causing the Discord
+  // adapter to post to the parent channel instead of the sub-channel/thread.
+  const existingUserFacing = findMostRecentUserFacingSession(targetAgentGroupId);
+  const targetSession = existingUserFacing ?? resolveSession(targetAgentGroupId, null, null, 'agent-shared').session;
   const a2aMsgId = `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // If the source message references files (via `send_file`), forward the

@@ -2,6 +2,7 @@ import { findByName, getAllDestinations, type DestinationEntry } from './destina
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import { getSessionRouting } from './db/session-routing.js';
 import {
   clearContinuation,
   migrateLegacyContinuation,
@@ -386,22 +387,38 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
   // the session's originating channel (from session_routing) if available,
   // otherwise fall back to the single destination.
   if (sent === 0 && scratchpad) {
-    if (routing.channelType && routing.platformId) {
-      // Reply to the channel/thread the message came from
+    // When the inbound came from another agent (a2a), the inbound routing
+    // points back to the source agent group, not the user's channel. Use
+    // session_routing instead so the reply lands in the correct channel/thread
+    // (e.g. the Discord thread) rather than bouncing back to the sub-agent.
+    let replyRouting = routing;
+    if (routing.channelType === 'agent') {
+      const sessionRoute = getSessionRouting();
+      if (sessionRoute.channel_type && sessionRoute.platform_id) {
+        replyRouting = {
+          platformId: sessionRoute.platform_id,
+          channelType: sessionRoute.channel_type,
+          threadId: sessionRoute.thread_id,
+          inReplyTo: null,
+        };
+      }
+    }
+
+    if (replyRouting.channelType && replyRouting.platformId) {
       writeMessageOut({
         id: generateId(),
-        in_reply_to: routing.inReplyTo,
+        in_reply_to: replyRouting.inReplyTo,
         kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
+        platform_id: replyRouting.platformId,
+        channel_type: replyRouting.channelType,
+        thread_id: replyRouting.threadId,
         content: JSON.stringify({ text: scratchpad }),
       });
       return;
     }
     const all = getAllDestinations();
     if (all.length === 1) {
-      sendToDestination(all[0], scratchpad, routing);
+      sendToDestination(all[0], scratchpad, replyRouting);
       return;
     }
   }
@@ -418,16 +435,28 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  // Inherit thread_id from the inbound routing context so replies land in the
-  // same thread the conversation is in. For non-threaded adapters the router
-  // strips thread_id at ingest, so this will already be null.
+
+  // Normally, inherit thread_id from the inbound message so replies land in
+  // the same thread the conversation started in.
+  // Special case: when the inbound was an a2a message, its thread_id is always
+  // null (agent messages have no thread). If session_routing has a thread for
+  // the same channel, use that — otherwise the reply lands in the parent
+  // channel instead of the correct thread (e.g. the Discord sub-channel).
+  let threadId = routing.threadId;
+  if (!threadId && routing.channelType === 'agent' && dest.type === 'channel') {
+    const sessionRoute = getSessionRouting();
+    if (sessionRoute.channel_type === channelType && sessionRoute.platform_id === platformId) {
+      threadId = sessionRoute.thread_id;
+    }
+  }
+
   writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
-    thread_id: routing.threadId,
+    thread_id: threadId,
     content: JSON.stringify({ text: body }),
   });
 }

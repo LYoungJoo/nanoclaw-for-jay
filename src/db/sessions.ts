@@ -59,6 +59,21 @@ export function findSessionByAgentGroup(agentGroupId: string): Session | undefin
     .get(agentGroupId) as Session | undefined;
 }
 
+/**
+ * Find the most recently active user-facing session for an agent group.
+ * A user-facing session has messaging_group_id IS NOT NULL (it's tied to a
+ * real chat channel, e.g. a Discord thread). Used by a2a routing to prefer
+ * routing replies into the live channel session rather than the agent-shared
+ * session that has no channel/thread context.
+ */
+export function findMostRecentUserFacingSession(agentGroupId: string): Session | undefined {
+  return getDb()
+    .prepare(
+      "SELECT * FROM sessions WHERE agent_group_id = ? AND messaging_group_id IS NOT NULL AND status = 'active' ORDER BY last_active DESC LIMIT 1",
+    )
+    .get(agentGroupId) as Session | undefined;
+}
+
 export function getSessionsByAgentGroup(agentGroupId: string): Session[] {
   return getDb().prepare('SELECT * FROM sessions WHERE agent_group_id = ?').all(agentGroupId) as Session[];
 }
